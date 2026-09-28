@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Iterable, cast, Union, Optional
 import logging
 from ezdxf.lldxf import const
 from ezdxf.render.arrows import ARROWS
+from ezdxf.entities.copy import CopySettings, CopyStrategy
 from ezdxf.entities import (
     DXFEntity,
     DXFGraphic,
@@ -643,7 +644,13 @@ def new_clean_entity(entity: DXFEntity, keep_xdata: bool = False) -> DXFEntity:
         keep_xdata: keep xdata flag
 
     """
-    new_entity = entity.copy()
+    # The extension dictionary is removed by remove_dependencies() anyway, so do
+    # not copy it: copying fails for unknown objects (e.g. FIELD) and logs a
+    # warning about a problem that does not exist.
+    strategy = CopyStrategy(
+        CopySettings(copy_extension_dict=False, copy_xdata=keep_xdata)
+    )
+    new_entity = entity.copy(copy_strategy=strategy)
     new_entity.doc = None
     return remove_dependencies(new_entity, keep_xdata=keep_xdata)
 
