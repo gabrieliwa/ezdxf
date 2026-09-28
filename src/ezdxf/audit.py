@@ -58,6 +58,7 @@ class AuditError(IntEnum):
     INVALID_TABLE_HANDLE = 110
     DECODING_ERROR = 111
     CREATED_MISSING_OBJECT = 112
+    UNDEFINED_APPID = 113
     RESET_MLINE_STYLE = 113
     INVALID_GROUP_ENTITIES = 114
     UNDEFINED_BLOCK_NAME = 115
@@ -344,12 +345,42 @@ class Auditor:
         # To create new entities while auditing, add a post audit job by calling
         # Auditor.app_post_audit_job() with a callable object or function as argument.
         self._post_audit_jobs = []
+        self._undefined_appids: set[str] = set()
         for entity in db.values():
             if entity.is_alive:
                 entity.audit(self)
+                self.check_xdata_appids(entity)
         db.locked = False
         self.empty_trashcan()
+        self.declare_undefined_appids()
         self.exec_post_audit_jobs()
+
+    def check_xdata_appids(self, entity: DXFEntity) -> None:
+        """Check for XDATA application ids missing from the APPID table.
+        AutoCAD refuses objects with such XDATA ("premature end of object")
+        and discards the whole drawing. The fix declares the APPID.
+        """
+        xdata = entity.xdata
+        if xdata is None:
+            return
+        appids = self.doc.appids
+        for appid in list(xdata.data.keys()):
+            if appids.has_entry(appid) or appid in self._undefined_appids:
+                continue
+            self._undefined_appids.add(appid)
+            self.fixed_error(
+                code=AuditError.UNDEFINED_APPID,
+                message=f"Declared undefined APPID {appid} used by XDATA of {str(entity)}",
+                dxf_entity=entity,
+                data=appid,
+            )
+
+    def declare_undefined_appids(self) -> None:
+        appids = self.doc.appids
+        for appid in sorted(self._undefined_appids):
+            if not appids.has_entry(appid):
+                appids.add(appid)
+        self._undefined_appids = set()
 
     def exec_post_audit_jobs(self):
         for call in self._post_audit_jobs:

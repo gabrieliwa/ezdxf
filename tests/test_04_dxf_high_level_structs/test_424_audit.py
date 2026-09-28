@@ -283,3 +283,15 @@ def test_destroyed_active_paperspace():
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+def test_audit_declares_undefined_xdata_appid():
+    # AutoCAD discards a drawing whose XDATA uses an APPID missing from the
+    # APPID table ("premature end of object").
+    doc = ezdxf.new()
+    line = doc.modelspace().add_line((0, 0), (1, 1))
+    line.set_xdata("NOT_DECLARED", [(1000, "x")])
+    auditor = doc.audit()
+    assert doc.appids.has_entry("NOT_DECLARED")
+    assert any(f.code == AuditError.UNDEFINED_APPID for f in auditor.fixes)
+    assert len(doc.audit().fixes) == 0
