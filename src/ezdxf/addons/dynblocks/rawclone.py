@@ -177,7 +177,19 @@ def clone_objects(
     for clone in clones:
         clone.post_load_hook(target)
         _prune_reactors(clone, target)
+        _declare_appids(clone, target)
     return clones
+
+
+def _declare_appids(entity: DXFEntity, doc: Drawing) -> None:
+    """Every application id used by the xdata of `entity` must exist in the
+    APPID table, otherwise AutoCAD refuses the object ("premature end of
+    object")."""
+    if entity.xdata is None:
+        return
+    for appid in entity.xdata.data.keys():
+        if not doc.appids.has_entry(appid):
+            doc.appids.add(appid)
 
 
 def _prune_reactors(entity: DXFEntity, doc: Drawing) -> None:
