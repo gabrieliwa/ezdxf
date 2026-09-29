@@ -102,8 +102,18 @@ def _element_name(entity: DXFEntity) -> str:
 
 
 def is_dynamic_block(block_record: BlockRecord) -> bool:
-    """Returns ``True`` if the BLOCK_RECORD is a dynamic block definition."""
-    return block_record.has_xdata(APPID_GUID)
+    """Returns ``True`` if the BLOCK_RECORD is a dynamic block definition.
+
+    The GUID xdata alone is not enough: AutoCAD also tags static blocks edited
+    in the block editor with it. A dynamic block definition owns the
+    ACAD_ENHANCEDBLOCK evaluation graph in its extension dictionary.
+    """
+    if not block_record.has_xdata(APPID_GUID):
+        return False
+    if not block_record.has_extension_dict:
+        return False
+    graph = block_record.get_extension_dict().get(KEY_ENHANCED_BLOCK)
+    return graph is not None and graph.dxftype() == EVAL_GRAPH
 
 
 @dataclass
