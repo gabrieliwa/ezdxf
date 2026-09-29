@@ -212,3 +212,16 @@ class TestInsert:
         b = dynblocks.insert_dynamic_block(d, doc.modelspace(), (5, 0), Values(linear={"Larghezza Tavolo": 1.8}))
         assert a.dxf.name != b.dxf.name
         assert dynblkhelper.get_dynamic_block_definition(a) is dynblkhelper.get_dynamic_block_definition(b)
+
+
+def test_static_block_with_guid_xdata_is_not_dynamic():
+    # AutoCAD tags static blocks edited in the block editor with the GUID
+    # xdata too, but they own no evaluation graph.
+    doc = ezdxf.new("R2010")
+    doc.appids.add("AcDbDynamicBlockGUID")
+    block = doc.blocks.new("STATIC")
+    block.block_record.set_xdata(
+        "AcDbDynamicBlockGUID", [(1000, "{00000000-0000-0000-0000-000000000000}")]
+    )
+    assert dynblocks.is_dynamic_block(block.block_record) is False
+    assert "STATIC" not in list(dynblocks.dynamic_blocks(doc))
