@@ -70,5 +70,5 @@ Rotate, Flip, Array, Polar, XY parameters would need their own bake functions.
 
 `tests/test_10_dynblocks` uses a real AutoCAD master (Ca' Foscari furniture)
 as ground truth: the five references AutoCAD saved are reproduced exactly.
-Structural tag-by-tag diffs against AutoCAD: `~/projects/ezdxf-dynblocks/qa/`.
+Structural tag-by-tag diffs against AutoCAD: `notes/dynblocks/qa/` in this repository.
 Final validation is only possible in AutoCAD.

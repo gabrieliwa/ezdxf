@@ -36,6 +36,6 @@ AutoCAD e non li accetterà mai: la nostra aggiunta vive in
 5. Verifica di riferimento: le istanze salvate da AutoCAD in un master (blocchi
    `*U`) sono la verità; `tests/test_10_dynblocks` confronta la nostra
    valutazione con quelle. Per un confronto tag per tag usare gli script in
-   `~/projects/ezdxf-dynblocks/qa/` (`structdiff.py`, `defdiff.py`).
+   `notes/dynblocks/qa/` (`structdiff.py`, `defdiff.py`).
 6. Prova finale solo in AutoCAD (Gab): apertura, grip, tendine, REGEN,
    RESETBLOCK. Nessuna libreria aperta può validare i blocchi dinamici.
