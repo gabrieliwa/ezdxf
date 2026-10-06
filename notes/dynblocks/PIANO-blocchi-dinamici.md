@@ -83,7 +83,7 @@ Regola: in app il rilevatore compila **solo l'attributo**. Da lì derivano sia l
 - Dashboard viewer: opzionale (oggi solo icone).
 
 ### Fase 4 — Export L2 "vivo" (fork ezdxf) · ~1-2 settimane + iterazioni con AutoCAD
-- Fork `mozman/ezdxf` (clone già in `~/projects/ezdxf-dynblocks/ezdxf`, v1.4.4) → branch `dynblocks`, installato nel venv del converter da git.
+- Fork `mozman/ezdxf` (clone in `~/projects/ezdxf`, v1.4.4) → branch `dynblocks`, installato nel venv del converter da git.
 - Nel fork: copia degli oggetti "grezzi" (`DXFTagStorage.copy`) con rimappatura handle (330/331/332/340/360/1005), copia extension dict + XDATA del BLOCK_RECORD, `Importer` che porta il sottografo dinamico; helper per creare `*U` + `AcDbBlockRepresentation` + XRECORD dei valori + FIELD degli ATTRIB.
 - Riferimento per i codici DXF: ACadSharp (C#, MIT), LibreDWG `dwg2.spec` (solo lettura), articolo Lazebny sul grafo di valutazione.
 - Validazione: file di prova aperto in AutoCAD da Gab (grip funzionanti? REGEN stabile? RESETBLOCK ok? nessun "file corrotto"?).

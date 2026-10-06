@@ -1,4 +1,4 @@
-import ezdxf, sys, traceback
+import ezdxf, os, sys, tempfile, traceback
 from ezdxf.addons import dynblocks as db
 from ezdxf.math import Vec3
 SRC = "/Users/iwa/projects/ezdxf/tests/test_10_dynblocks/data/ca_foscari.dxf"
@@ -42,7 +42,7 @@ for anon, (name, values) in cases.items():
     if not ok:
         for a,b in zip(mine, truth):
             if a!=b: print("   mine ", a); print("   truth", b)
-out = "/Users/iwa/projects/ezdxf-dynblocks/qa/out_smoke.dxf"
+out = os.path.join(tempfile.gettempdir(), "out_smoke.dxf")
 auditor = doc.audit()
 print("audit errors:", len(auditor.errors), [str(e.message)[:100] for e in auditor.errors[:5]], "fixes:", len(auditor.fixes), [str(f.message)[:100] for f in auditor.fixes[:5]])
 doc.saveas(out)
