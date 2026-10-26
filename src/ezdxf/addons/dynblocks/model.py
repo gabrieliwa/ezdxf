@@ -15,8 +15,9 @@ OBJECTS section, reachable from the BLOCK_RECORD's extension dictionary:
 
 `ezdxf` loads all of these as :class:`DXFTagStorage` (raw tags). This module
 parses the subset needed to *evaluate* a block instance: linear parameters with
-their stretch and scale actions, and visibility parameters with their lookup
-tables.
+their stretch and scale actions (chained ones included), flip parameters with
+their flip actions, the base point parameter, and visibility parameters with
+their lookup tables.
 Everything else is preserved as raw tags but not interpreted.
 
 The group codes were reverse engineered from AutoCAD 2018 output and cross
@@ -41,6 +42,9 @@ __all__ = [
     "LinearParameter",
     "StretchAction",
     "ScaleAction",
+    "FlipParameter",
+    "FlipAction",
+    "BasePointParameter",
     "VisibilityParameter",
     "VisibilityState",
     "LookupParameter",
@@ -64,6 +68,12 @@ EVAL_GRAPH = "ACAD_EVALUATION_GRAPH"
 LINEAR_PARAMETER = "BLOCKLINEARPARAMETER"
 STRETCH_ACTION = "BLOCKSTRETCHACTION"
 SCALE_ACTION = "BLOCKSCALEACTION"
+FLIP_PARAMETER = "BLOCKFLIPPARAMETER"
+FLIP_ACTION = "BLOCKFLIPACTION"
+BASE_POINT_PARAMETER = "BLOCKBASEPOINTPARAMETER"
+# Nodes that only matter while a draughtsman inserts or grips the block in
+# AutoCAD: they never change the geometry of a reference.
+INERT_NODES = ("BLOCKALIGNMENTPARAMETER", "BLOCKGRIPLOCATIONCOMPONENT")
 VISIBILITY_PARAMETER = "BLOCKVISIBILITYPARAMETER"
 LOOKUP_PARAMETER = "BLOCKLOOKUPPARAMETER"
 LOOKUP_ACTION = "BLOCKLOOKUPACTION"
@@ -104,6 +114,26 @@ def _element_name(entity: DXFEntity) -> str:
     return str(_subclass(entity, "AcDbBlockElement").get_first_value(300, ""))
 
 
+def _parameter_flags(entity: DXFEntity) -> tuple[bool, bool]:
+    """(show properties, chain actions) of a parameter (AcDbBlockParameter
+    280 / 281). A hidden parameter is not offered in the Properties palette;
+    a chained one fires its own actions when another action moves it."""
+    tags = _subclass(entity, "AcDbBlockParameter")
+    return int(tags.get_first_value(280, 1)) == 1, int(tags.get_first_value(281, 0)) == 1
+
+
+def _grip_node(entity: DXFEntity) -> int:
+    """Node id of the parameter's first grip (AcDbBlock2PtParameter, first 91
+    after the 170 count), 0 if it has none."""
+    found = False
+    for code, value in _subclass(entity, "AcDbBlock2PtParameter"):
+        if code == 170:
+            found = True
+        elif code == 91 and found:
+            return int(value)
+    return 0
+
+
 def is_dynamic_block(block_record: BlockRecord) -> bool:
     """Returns ``True`` if the BLOCK_RECORD is a dynamic block definition.
 
@@ -132,6 +162,8 @@ class LinearParameter:
     description: str
     base: Vec3
     end: Vec3
+    show_properties: bool = True  # 280: offered in the Properties palette
+    chain_actions: bool = False  # 281: fires its actions when another action moves it
 
     @property
     def default_distance(self) -> float:
@@ -148,6 +180,7 @@ class LinearParameter:
     def load(cls, entity: DXFEntity) -> LinearParameter:
         two_pt = _subclass(entity, "AcDbBlock2PtParameter")
         linear = _subclass(entity, "AcDbBlockLinearParameter")
+        show, chain = _parameter_flags(entity)
         return cls(
             node_id=_node_id(entity),
             handle=entity.dxf.handle,
@@ -156,6 +189,8 @@ class LinearParameter:
             description=str(linear.get_first_value(306, "")),
             base=Vec3(two_pt.get_first_value(1010)),
             end=Vec3(two_pt.get_first_value(1011)),
+            show_properties=show,
+            chain_actions=chain,
         )
 
 
@@ -284,6 +319,113 @@ class ScaleAction:
             base_dependent=int(with_base.get_first_value(280, 0)) == 1,
             offset=Vec3(with_base.get_first_value(1012, (0, 0, 0))),
         )
+
+
+@dataclass
+class FlipParameter:
+    """A flip parameter (BLOCKFLIPPARAMETER): a reflection line from `base` to
+    `end` and two states, "not flipped" (the definition) and "flipped", named
+    in the Properties palette by `state_names` (e.g. "Non ribaltato" /
+    "Ribaltato" for a door's hinge side).
+    """
+
+    node_id: int
+    handle: str
+    name: str  # element name, e.g. "Flip1"
+    label: str  # property label, e.g. "Lato cerniera"
+    description: str
+    base: Vec3
+    end: Vec3
+    state_names: tuple[str, str]  # 307 / 308
+    grip_node: int = 0  # node id of its flip grip (0: none)
+    show_properties: bool = True
+    chain_actions: bool = False
+
+    def state_index(self, value: Union[str, bool, int]) -> int:
+        """0 (as defined) or 1 (flipped) for a state name, a bool or 0 / 1."""
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return 1 if value else 0
+        text = str(value).strip()
+        for index, name in enumerate(self.state_names):
+            if text.lower() == name.lower():
+                return index
+        if text in ("0", "1"):
+            return int(text)
+        raise DynamicBlockError(
+            f"unknown flip state {value!r} of {self.label!r}; available: {list(self.state_names)}"
+        )
+
+    @classmethod
+    def load(cls, entity: DXFEntity) -> FlipParameter:
+        two_pt = _subclass(entity, "AcDbBlock2PtParameter")
+        flip = _subclass(entity, "AcDbBlockFlipParameter")
+        show, chain = _parameter_flags(entity)
+        return cls(
+            node_id=_node_id(entity),
+            handle=entity.dxf.handle,
+            name=_element_name(entity),
+            label=str(flip.get_first_value(305, "")),
+            description=str(flip.get_first_value(306, "")),
+            base=Vec3(two_pt.get_first_value(1010)),
+            end=Vec3(two_pt.get_first_value(1011)),
+            state_names=(
+                str(flip.get_first_value(307, "0")),
+                str(flip.get_first_value(308, "1")),
+            ),
+            grip_node=_grip_node(entity),
+            show_properties=show,
+            chain_actions=chain,
+        )
+
+
+@dataclass
+class FlipAction:
+    """A flip action (BLOCKFLIPACTION) bound to a flip parameter: in the
+    flipped state its selection (entities, and the parameters and grips it
+    carries) is mirrored about the parameter's line."""
+
+    node_id: int
+    handle: str
+    name: str
+    parameter_node: int  # node id of the flip parameter (group code 92)
+    selection: list[str]
+
+    @classmethod
+    def load(cls, entity: DXFEntity) -> FlipAction:
+        flip = _subclass(entity, "AcDbBlockFlipAction")
+        return cls(
+            node_id=_node_id(entity),
+            handle=entity.dxf.handle,
+            name=_element_name(entity),
+            parameter_node=int(flip.get_first_value(92)),
+            selection=_selection(entity),
+        )
+
+
+@dataclass
+class BasePointParameter:
+    """The base point parameter (BLOCKBASEPOINTPARAMETER): the point of the
+    geometry that sits on the insertion point of a reference. When an action
+    carries it along (a door whose width grows on both sides), AutoCAD shifts
+    the whole geometry back so the point stays on the insertion point."""
+
+    node_id: int
+    handle: str
+    point: Vec3
+
+    @classmethod
+    def load(cls, entity: DXFEntity) -> BasePointParameter:
+        base = _subclass(entity, "AcDbBlockBasepointParameter")
+        one_pt = _subclass(entity, "AcDbBlock1PtParameter")
+        # 1011 is the point AutoCAD keeps on the insertion point (its records
+        # write it back as (0, 0) for every reference); 1010 only places the
+        # parameter's label in the block editor.
+        point = base.get_first_value(1011, None)
+        if point is None:
+            point = one_pt.get_first_value(1010)
+        return cls(node_id=_node_id(entity), handle=entity.dxf.handle, point=Vec3(point))
 
 
 @dataclass
@@ -471,6 +613,9 @@ class DynamicBlockDefinition:
     linear_parameters: list[LinearParameter] = field(default_factory=list)
     stretch_actions: list[StretchAction] = field(default_factory=list)
     scale_actions: list[ScaleAction] = field(default_factory=list)
+    flip_parameters: list[FlipParameter] = field(default_factory=list)
+    flip_actions: list[FlipAction] = field(default_factory=list)
+    base_point: Optional[BasePointParameter] = None
     visibility: Optional[VisibilityParameter] = None
     lookup_parameters: list[LookupParameter] = field(default_factory=list)
     lookup_actions: list[LookupAction] = field(default_factory=list)
@@ -509,6 +654,49 @@ class DynamicBlockDefinition:
             f"{self.name}: unknown linear parameter {key!r}; "
             f"available: {[p.label for p in self.linear_parameters]}"
         )
+
+    def flip_parameter(self, key: Union[str, int]) -> FlipParameter:
+        """Find a flip parameter by node id, label or element name."""
+        for p in self.flip_parameters:
+            if key == p.node_id or key == p.label or key == p.name:
+                return p
+        raise DynamicBlockError(
+            f"{self.name}: unknown flip parameter {key!r}; "
+            f"available: {[p.label for p in self.flip_parameters]}"
+        )
+
+    def flip_actions_of(self, parameter: FlipParameter) -> list[FlipAction]:
+        return [a for a in self.flip_actions if a.parameter_node == parameter.node_id]
+
+    def stretch_movers(self, handle: str, point: Vec3) -> list[tuple[LinearParameter, StretchAction]]:
+        """The (parameter, stretch action) pairs that carry `point` of the
+        selected object `handle` (a parameter, the base point) along."""
+        found = []
+        for action in self.stretch_actions:
+            if not action.moves(handle, point):
+                continue
+            for other in self.linear_parameters:
+                if other.node_id == action.parameter_node and other.handle != handle:
+                    found.append((other, action))
+        return found
+
+    def chain_of(self, parameter: LinearParameter) -> list[tuple[LinearParameter, float]]:
+        """For a chained parameter (chain actions on): the parameters whose
+        stretches move its points, each with the change of `parameter`'s
+        distance per unit change of theirs — the small leaf of a double door
+        is the width minus the big leaf: [(width, 1), (big leaf, -1)].
+        Empty for a parameter that does not chain."""
+        if not parameter.chain_actions:
+            return []
+        rates: dict[int, float] = {}
+        by_node: dict[int, LinearParameter] = {}
+        direction = parameter.direction
+        for which, point in ((1.0, parameter.end), (-1.0, parameter.base)):
+            for other, action in self.stretch_movers(parameter.handle, point):
+                moved = action.displacement(other.direction)
+                rates[other.node_id] = rates.get(other.node_id, 0.0) + which * moved.dot(direction)
+                by_node[other.node_id] = other
+        return [(by_node[n], rate) for n, rate in rates.items() if abs(rate) > 1e-12]
 
     def lookup_parameter(self, key: Union[str, int]) -> LookupParameter:
         for p in self.lookup_parameters:
@@ -607,8 +795,14 @@ class DynamicBlockDefinition:
             self.lookup_parameters.append(LookupParameter.load(node))
         elif dxftype == LOOKUP_ACTION:
             self.lookup_actions.append(LookupAction.load(node))
-        elif dxftype.endswith("GRIP") or dxftype == "BLOCKGRIPLOCATIONCOMPONENT":
-            pass  # grips do not influence the evaluation
+        elif dxftype == FLIP_PARAMETER:
+            self.flip_parameters.append(FlipParameter.load(node))
+        elif dxftype == FLIP_ACTION:
+            self.flip_actions.append(FlipAction.load(node))
+        elif dxftype == BASE_POINT_PARAMETER:
+            self.base_point = BasePointParameter.load(node)
+        elif dxftype.endswith("GRIP") or dxftype in INERT_NODES:
+            pass  # grips and alignment do not influence the evaluation
         else:
             self.unsupported.append(dxftype)
 
