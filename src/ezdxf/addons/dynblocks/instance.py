@@ -26,7 +26,7 @@ from ezdxf.lldxf.tags import Tags
 from ezdxf.lldxf.types import DXFTag, dxftag
 from ezdxf.math import Vec3
 
-from .bake import apply_linear, apply_visibility, current_visibility_state
+from .bake import apply_linear_values, apply_visibility, current_visibility_state
 from .copy import ensure_appids, ensure_class, register_fields
 from .model import (
     APPID_REP_BTAG,
@@ -164,10 +164,12 @@ def insert_dynamic_block(
 
     # 2. evaluate the parameters
     distances: dict[int, float] = {}
+    by_parameter: list[tuple[LinearParameter, float]] = []
     for key, distance in values.linear.items():
         param = defn.linear_parameter(key)
         distances[param.node_id] = float(distance)
-        apply_linear(defn, entities, param, distance, warnings)
+        by_parameter.append((param, float(distance)))
+    apply_linear_values(defn, entities, by_parameter, warnings)
 
     state: Optional[str] = values.visibility
     lookup_values: dict[int, str] = {}

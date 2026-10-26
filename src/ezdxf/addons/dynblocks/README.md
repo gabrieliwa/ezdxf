@@ -33,7 +33,11 @@ Definition (`BLOCK_RECORD`):
 - xdata `AcDbDynamicBlockGUID`, `AcDbDynamicBlockTrueName`, `AcDbBlockRepETag`;
 - extension dict `ACAD_ENHANCEDBLOCK` → `ACAD_EVALUATION_GRAPH` → nodes (360):
   `BLOCKLINEARPARAMETER` (1010 base, 1011 end, 305 label), `BLOCKSTRETCHACTION`
-  (92 parameter node, 1011×n frame, 331 entity + 74/94 vertex indices),
+  (92 parameter node, 1011×n frame, 330 selection — entities, parameters and
+  grips the frame carries along —, 331 entity + 74/94 vertex indices, 140
+  distance multiplier, 141 angle offset in radians), `BLOCKSCALEACTION` (330
+  selection, 92 parameter node, 1011 base point, 280 = 1 base point dependent
+  on the parameter's base, 1012 offset; scale = distance / definition distance),
   `BLOCKVISIBILITYPARAMETER` (301 label, 331 governed entities, 303 state + 332
   visible entities), `BLOCKLOOKUPPARAMETER` (303 label), `BLOCKLOOKUPACTION`
   (92×93 table of 302 cells, columns 303/94/304/282), grips;
@@ -61,14 +65,21 @@ values, and only recomputes when a grip or property changes.
 ## Supported / not supported
 
 Supported: linear parameters + stretch actions (LWPOLYLINE, POLYLINE, LINE, ARC,
-CIRCLE, ELLIPSE, TEXT/ATTDEF/MTEXT/INSERT/POINT, SOLID/TRACE/3DFACE vertices),
-visibility parameters, lookup parameters/actions. Any other node type is kept as
-raw tags (`DynamicBlockDefinition.unsupported`) and not evaluated: Move, Scale,
-Rotate, Flip, Array, Polar, XY parameters would need their own bake functions.
+CIRCLE, ELLIPSE, TEXT/ATTDEF/MTEXT/INSERT/POINT, SOLID/TRACE/3DFACE vertices;
+distance multiplier and angle offset honoured) + scale actions (uniform, about a
+fixed or parameter-dependent base point; the same entity types), visibility
+parameters, lookup parameters/actions. A parameter carried along by another
+parameter's stretch frame (a hinge the width pushes) moves with it, so a
+dependent scale base follows. Any other node type is kept as raw tags
+(`DynamicBlockDefinition.unsupported`) and not evaluated: Move, Rotate, Flip,
+Array, Polar, XY parameters would need their own bake functions.
 
 ## Verification
 
 `tests/test_10_dynblocks` uses a real AutoCAD master (Ca' Foscari furniture)
-as ground truth: the five references AutoCAD saved are reproduced exactly.
+as ground truth: the five references AutoCAD saved are reproduced exactly. The
+door `serrint_2264.dxf` (two stretch actions at 0.5, one at 270°, three scale
+actions about the hinges) checks multiplier, angle offset and scale against
+the arithmetic AutoCAD showed on screen (GAB-1957).
 Structural tag-by-tag diffs against AutoCAD: `notes/dynblocks/qa/` in this repository.
 Final validation is only possible in AutoCAD.

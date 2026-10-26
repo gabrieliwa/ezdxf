@@ -25,6 +25,7 @@ from .model import (
     LinearParameter,
     LookupAction,
     LookupParameter,
+    ScaleAction,
     StretchAction,
     VisibilityParameter,
     VisibilityState,
@@ -38,7 +39,14 @@ from .instance import (
     guess_field_bindings,
     insert_dynamic_block,
 )
-from .bake import apply_linear, apply_visibility, current_visibility_state, move_vertices
+from .bake import (
+    apply_linear,
+    apply_linear_values,
+    apply_visibility,
+    current_visibility_state,
+    move_vertices,
+    scale_entity,
+)
 
 __all__ = [
     "DynamicBlockDefinition",
@@ -47,10 +55,12 @@ __all__ = [
     "LinearParameter",
     "LookupAction",
     "LookupParameter",
+    "ScaleAction",
     "StretchAction",
     "VisibilityParameter",
     "VisibilityState",
     "apply_linear",
+    "apply_linear_values",
     "apply_visibility",
     "copy_dynamic_block",
     "current_visibility_state",
@@ -62,5 +72,6 @@ __all__ = [
     "insert_dynamic_block",
     "is_dynamic_block",
     "move_vertices",
+    "scale_entity",
     "register_fields",
 ]

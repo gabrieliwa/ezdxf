@@ -225,3 +225,111 @@ def test_static_block_with_guid_xdata_is_not_dynamic():
     )
     assert dynblocks.is_dynamic_block(block.block_record) is False
     assert "STATIC" not in list(dynblocks.dynamic_blocks(doc))
+
+
+# ---------------------------------------------------------------------------
+# Distance multiplier, angle offset and scale actions (GAB-1957): a door from
+# the 2264 master. The jambs follow the width, the middle line of the wall
+# moves at half the thickness, the swing arc scales about the hinge, the big
+# leaf of the double door grows at right angles to its own parameter.
+# ---------------------------------------------------------------------------
+
+DOOR = Path(__file__).parent / "data" / "serrint_2264.dxf"
+DOOR_WIDTH = 0.8986100377805826  # the width the door was drawn with
+
+
+@pytest.fixture(scope="module")
+def door():
+    return ezdxf.readfile(DOOR)
+
+
+def by_index(defn_block, anon_block):
+    """definition entity handle -> baked copy (same order in both blocks)."""
+    return {d.dxf.handle: c for d, c in zip(defn_block, anon_block)}
+
+
+class TestDoorModel:
+    def test_scale_actions_are_understood(self, door):
+        d = dynblocks.DynamicBlockDefinition.load(door, "SERRINT")
+        assert "BLOCKSCALEACTION" not in d.unsupported
+        assert sorted(a.name for a in d.scale_actions) == ["Scale", "Scale1", "Scale2"]
+        swing = d.scale_actions_of(d.linear_parameter("Larghezza"))
+        assert [a.selection for a in swing] == [["46", "47"]]
+        assert swing[0].base_dependent is True
+
+    def test_multiplier_and_angle_offset(self, door):
+        d = dynblocks.DynamicBlockDefinition.load(door, "SERRINT")
+        thickness = d.linear_parameter("Spessore parete")
+        by_name = {a.name: a for a in d.stretch_actions_of(thickness)}
+        assert by_name["Stretch3"].distance_multiplier == 0.5
+        assert by_name["Stretch3"].targets == [("34", [0, 1])]
+        assert by_name["Stretch1"].distance_multiplier == 1.0
+        leaf = d.linear_parameter("Larghezza anta grande")
+        turned = next(a for a in d.stretch_actions_of(leaf) if a.angle_offset)
+        assert turned.angle_offset == pytest.approx(3 * 3.141592653589793 / 2)
+        # (-1, 0) turned by 270 degrees points up: the leaf grows along +Y
+        assert turned.displacement(Vec3(-0.3, 0, 0)).round(6) == Vec3(0, 0.3, 0)
+
+    def test_a_parameter_in_another_frame_moves_with_it(self, door):
+        d = dynblocks.DynamicBlockDefinition.load(door, "SERRINT")
+        width = d.linear_parameter("Larghezza")
+        big = d.linear_parameter("Larghezza anta grande")
+        small = d.linear_parameter("Anta piccola")
+        assert [(p.label, a.name) for p, a in d.movers_of(big)] == [("Larghezza", "Stretch")]
+        # the small leaf is selected by the same action, but its base point
+        # (the left hinge) lies outside the frame: it stays
+        assert d.movers_of(small) == []
+        assert d.movers_of(width) == []
+
+
+class TestDoorBake:
+    def bake(self, door, **linear):
+        doc = ezdxf.new("R2010")
+        d = dynblocks.copy_dynamic_block(door, "SERRINT", doc)
+        ref = dynblocks.insert_dynamic_block(d, doc.modelspace(), (0, 0), Values(linear=linear))
+        return by_index(d.block, doc.blocks[ref.dxf.name])
+
+    def test_wall_thickness_keeps_the_middle_line_in_the_middle(self, door):
+        e = self.bake(door, **{"Spessore parete": 0.3})
+        assert e["32"].dxf.start.y == pytest.approx(-0.05)  # room face: untouched
+        assert e["33"].dxf.start.y == pytest.approx(-0.35)  # opposite face: 30 cm away
+        assert e["34"].dxf.start.y == pytest.approx(-0.20)  # middle line: half way
+        assert e["34"].dxf.end.y == pytest.approx(-0.20)
+        assert e["42"].dxf.end.y == pytest.approx(-0.35)  # jambs reach the far face
+        assert e["43"].dxf.end.y == pytest.approx(-0.35)
+
+    def test_width_scales_the_swing_about_the_hinge(self, door):
+        width = 1.2
+        e = self.bake(door, Larghezza=width)
+        factor = width / DOOR_WIDTH
+        arc = e["47"]
+        assert arc.dxf.center.round(6) == Vec3(-0.45, -0.05, 0)  # the hinge stays
+        assert arc.dxf.radius == pytest.approx(0.9 * factor)
+        leaf = e["46"]
+        assert leaf.dxf.start.round(6) == Vec3(-0.45, -0.05, 0)
+        assert leaf.dxf.end.y == pytest.approx(-0.05 + 0.9 * factor)
+        # the passage line sits at half the width (multiplier 0.5)
+        assert e["48"].dxf.start.x == pytest.approx(0.5 * (width - DOOR_WIDTH))
+        # the right jamb moved by the whole change
+        assert e["43"].dxf.start.x == pytest.approx(0.45 + width - DOOR_WIDTH)
+
+    def test_dependent_base_follows_the_moved_hinge(self, door):
+        # the big leaf's hinge is the right jamb: the width pushes it, then
+        # the leaf scales about the pushed point
+        width, big = 1.2, 0.9
+        e = self.bake(door, **{"Larghezza": width, "Larghezza anta grande": big})
+        shift = width - DOOR_WIDTH
+        arc = e["45"]
+        assert arc.dxf.center.round(6) == Vec3(0.45 + shift, -0.05, 0).round(6)
+        assert arc.dxf.radius == pytest.approx(0.6 * big / 0.6)
+        # and the leaf line, turned by 270 degrees, grows upward by the change
+        assert e["36"].dxf.start.y == pytest.approx(0.6 + (big - 0.6))
+
+    def test_order_of_values_does_not_matter(self, door):
+        a = self.bake(door, **{"Larghezza": 1.2, "Larghezza anta grande": 0.9})
+        b = self.bake(door, **{"Larghezza anta grande": 0.9, "Larghezza": 1.2})
+        assert geometry(a.values()) == geometry(b.values())
+
+    def test_as_drawn_changes_nothing(self, door):
+        e = self.bake(door)
+        assert geometry(e.values()) == geometry(door.blocks["SERRINT"])
