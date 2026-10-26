@@ -9,13 +9,14 @@ OBJECTS section, reachable from the BLOCK_RECORD's extension dictionary:
       xdata AcDbDynamicBlockGUID / AcDbDynamicBlockTrueName
       extension dict
         ACAD_ENHANCEDBLOCK -> ACAD_EVALUATION_GRAPH
-            360 -> BLOCKLINEARPARAMETER / BLOCKSTRETCHACTION / BLOCKVISIBILITYPARAMETER
+            360 -> BLOCKLINEARPARAMETER / BLOCKSTRETCHACTION / BLOCKSCALEACTION / BLOCKVISIBILITYPARAMETER
                    BLOCKLOOKUPPARAMETER / BLOCKLOOKUPACTION / BLOCK*GRIP / ...
         AcDbDynamicBlockRoundTripPurgePreventer -> ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION
 
 `ezdxf` loads all of these as :class:`DXFTagStorage` (raw tags). This module
 parses the subset needed to *evaluate* a block instance: linear parameters with
-their stretch actions, and visibility parameters with their lookup tables.
+their stretch and scale actions, and visibility parameters with their lookup
+tables.
 Everything else is preserved as raw tags but not interpreted.
 
 The group codes were reverse engineered from AutoCAD 2018 output and cross
@@ -28,7 +29,7 @@ from typing import TYPE_CHECKING, Iterator, Optional, Union
 
 from ezdxf.lldxf import const
 from ezdxf.lldxf.tags import Tags
-from ezdxf.math import Vec3
+from ezdxf.math import Vec3, is_point_in_polygon_2d
 
 if TYPE_CHECKING:
     from ezdxf.document import Drawing
@@ -39,6 +40,7 @@ __all__ = [
     "DynamicBlockDefinition",
     "LinearParameter",
     "StretchAction",
+    "ScaleAction",
     "VisibilityParameter",
     "VisibilityState",
     "LookupParameter",
@@ -61,6 +63,7 @@ KEY_PURGE_PREVENTER = "AcDbDynamicBlockRoundTripPurgePreventer"
 EVAL_GRAPH = "ACAD_EVALUATION_GRAPH"
 LINEAR_PARAMETER = "BLOCKLINEARPARAMETER"
 STRETCH_ACTION = "BLOCKSTRETCHACTION"
+SCALE_ACTION = "BLOCKSCALEACTION"
 VISIBILITY_PARAMETER = "BLOCKVISIBILITYPARAMETER"
 LOOKUP_PARAMETER = "BLOCKLOOKUPPARAMETER"
 LOOKUP_ACTION = "BLOCKLOOKUPACTION"
@@ -156,10 +159,19 @@ class LinearParameter:
         )
 
 
+def _selection(entity: DXFEntity) -> list[str]:
+    """The handles an action moves as a whole (AcDbBlockAction, 330 tags):
+    entities, and the parameters and grips that sit inside the action's frame."""
+    return [str(value) for code, value in _subclass(entity, "AcDbBlockAction") if code == 330]
+
+
 @dataclass
 class StretchAction:
     """A stretch action (BLOCKSTRETCHACTION) bound to a linear parameter: the
-    listed vertices of the listed entities move by the parameter's displacement.
+    listed vertices of the listed entities move by the parameter's displacement,
+    scaled by `distance_multiplier` and turned by `angle_offset` (the two
+    "Overrides" of the action's Properties palette: a line kept in the middle of
+    a wall moves at 0.5, a leaf grows at right angles to its parameter).
     """
 
     node_id: int
@@ -169,6 +181,38 @@ class StretchAction:
     frame: list[Vec3]  # stretch frame polygon (1011 tags)
     # (entity handle, vertex indices) pairs - the vertices that follow the grip
     targets: list[tuple[str, list[int]]]
+    # everything the action moves as a whole: entities, and the parameters /
+    # grips inside its frame (their base and end points follow the displacement)
+    selection: list[str] = field(default_factory=list)
+    distance_multiplier: float = 1.0  # group code 140
+    angle_offset: float = 0.0  # group code 141, radians
+
+    def contains(self, point: Vec3) -> bool:
+        """``True`` if `point` lies in the stretch frame (a rectangle given by
+        two opposite corners, or a polygon)."""
+        if len(self.frame) < 2:
+            return False
+        if len(self.frame) == 2:
+            a, b = self.frame
+            return (
+                min(a.x, b.x) - 1e-9 <= point.x <= max(a.x, b.x) + 1e-9
+                and min(a.y, b.y) - 1e-9 <= point.y <= max(a.y, b.y) + 1e-9
+            )
+        return is_point_in_polygon_2d(point, self.frame) >= 0
+
+    def moves(self, handle: str, point: Vec3) -> bool:
+        """``True`` if the action carries `point` of the selected object
+        `handle` along — AutoCAD moves the points of a selected parameter or
+        grip that sit inside the frame, as it does for an entity's vertices."""
+        return handle in self.selection and self.contains(point)
+
+    def displacement(self, parameter_delta: Vec3) -> Vec3:
+        """The vector the targets move by, for a parameter that changed by
+        `parameter_delta` (its direction times the change of distance)."""
+        delta = parameter_delta * self.distance_multiplier
+        if self.angle_offset:
+            delta = delta.rotate(self.angle_offset)
+        return delta
 
     @classmethod
     def load(cls, entity: DXFEntity) -> StretchAction:
@@ -193,6 +237,52 @@ class StretchAction:
             parameter_node=int(stretch.get_first_value(92)),
             frame=frame,
             targets=targets,
+            selection=_selection(entity),
+            distance_multiplier=float(stretch.get_first_value(140, 1.0)),
+            angle_offset=float(stretch.get_first_value(141, 0.0)),
+        )
+
+
+@dataclass
+class ScaleAction:
+    """A scale action (BLOCKSCALEACTION) bound to a linear parameter: the
+    selected entities are scaled about the base point by the ratio between the
+    parameter's distance and the distance it was defined with (a door leaf and
+    its swing arc that grow with the width).
+
+    The base point is either a fixed point of the block (`base_point`) or
+    "dependent": the driving parameter's base point plus `offset` — and that
+    base point itself moves when another action stretches the parameter.
+    """
+
+    node_id: int
+    handle: str
+    name: str
+    parameter_node: int  # node id of the driving parameter (group code 92)
+    selection: list[str]  # entity handles scaled (330 tags)
+    base_point: Vec3  # 1011
+    base_dependent: bool  # 280: 1 = the parameter's base point, 0 = `base_point`
+    offset: Vec3  # 1012, added to the dependent base point
+
+    def base_for(self, parameter: LinearParameter, parameter_shift: Vec3 = Vec3()) -> Vec3:
+        """The point the selection scales about, for `parameter` whose base
+        point another action moved by `parameter_shift`."""
+        if self.base_dependent:
+            return parameter.base + parameter_shift + self.offset
+        return self.base_point
+
+    @classmethod
+    def load(cls, entity: DXFEntity) -> ScaleAction:
+        with_base = _subclass(entity, "AcDbBlockActionWithBasePt")
+        return cls(
+            node_id=_node_id(entity),
+            handle=entity.dxf.handle,
+            name=_element_name(entity),
+            parameter_node=int(with_base.get_first_value(92)),
+            selection=_selection(entity),
+            base_point=Vec3(with_base.get_first_value(1011, (0, 0, 0))),
+            base_dependent=int(with_base.get_first_value(280, 0)) == 1,
+            offset=Vec3(with_base.get_first_value(1012, (0, 0, 0))),
         )
 
 
@@ -380,6 +470,7 @@ class DynamicBlockDefinition:
     nodes: dict[int, DXFEntity] = field(default_factory=dict)  # node id -> raw object
     linear_parameters: list[LinearParameter] = field(default_factory=list)
     stretch_actions: list[StretchAction] = field(default_factory=list)
+    scale_actions: list[ScaleAction] = field(default_factory=list)
     visibility: Optional[VisibilityParameter] = None
     lookup_parameters: list[LookupParameter] = field(default_factory=list)
     lookup_actions: list[LookupAction] = field(default_factory=list)
@@ -430,6 +521,28 @@ class DynamicBlockDefinition:
 
     def stretch_actions_of(self, parameter: LinearParameter) -> list[StretchAction]:
         return [a for a in self.stretch_actions if a.parameter_node == parameter.node_id]
+
+    def scale_actions_of(self, parameter: LinearParameter) -> list[ScaleAction]:
+        return [a for a in self.scale_actions if a.parameter_node == parameter.node_id]
+
+    def parameter_by_handle(self, handle: str) -> Optional[LinearParameter]:
+        for p in self.linear_parameters:
+            if p.handle == handle:
+                return p
+        return None
+
+    def movers_of(self, parameter: LinearParameter) -> list[tuple[LinearParameter, StretchAction]]:
+        """The (parameter, stretch action) pairs whose action carries `parameter`
+        along — its base point sits in their frame — so a scale action that
+        depends on that base point follows them too."""
+        found = []
+        for action in self.stretch_actions:
+            if not action.moves(parameter.handle, parameter.base):
+                continue
+            for other in self.linear_parameters:
+                if other.node_id == action.parameter_node and other is not parameter:
+                    found.append((other, action))
+        return found
 
     def lookup_action_of(self, parameter: LookupParameter) -> Optional[LookupAction]:
         for action in self.lookup_actions:
@@ -484,6 +597,8 @@ class DynamicBlockDefinition:
             self.linear_parameters.append(LinearParameter.load(node))
         elif dxftype == STRETCH_ACTION:
             self.stretch_actions.append(StretchAction.load(node))
+        elif dxftype == SCALE_ACTION:
+            self.scale_actions.append(ScaleAction.load(node))
         elif dxftype == VISIBILITY_PARAMETER:
             if self.visibility is not None:
                 raise DynamicBlockError(f"{self.name}: more than one visibility parameter")
