@@ -302,25 +302,28 @@ class TestDoorBake:
         width = 1.2
         e = self.bake(door, Larghezza=width)
         factor = width / DOOR_WIDTH
+        # the base point parameter rides the middle (multiplier 0.5): the
+        # door grows by half on each side of the insertion point
+        half = (width - DOOR_WIDTH) / 2
         arc = e["47"]
-        assert arc.dxf.center.round(6) == Vec3(-0.45, -0.05, 0)  # the hinge stays
+        assert arc.dxf.center.round(6) == Vec3(-0.45 - half, -0.05, 0).round(6)  # the hinge
         assert arc.dxf.radius == pytest.approx(0.9 * factor)
         leaf = e["46"]
-        assert leaf.dxf.start.round(6) == Vec3(-0.45, -0.05, 0)
+        assert leaf.dxf.start.round(6) == Vec3(-0.45 - half, -0.05, 0).round(6)
         assert leaf.dxf.end.y == pytest.approx(-0.05 + 0.9 * factor)
-        # the passage line sits at half the width (multiplier 0.5)
-        assert e["48"].dxf.start.x == pytest.approx(0.5 * (width - DOOR_WIDTH))
-        # the right jamb moved by the whole change
-        assert e["43"].dxf.start.x == pytest.approx(0.45 + width - DOOR_WIDTH)
+        # the passage line stays on the insertion point
+        assert e["48"].dxf.start.x == pytest.approx(0.0)
+        # the right jamb moved by the other half
+        assert e["43"].dxf.start.x == pytest.approx(0.45 + half)
 
     def test_dependent_base_follows_the_moved_hinge(self, door):
         # the big leaf's hinge is the right jamb: the width pushes it, then
         # the leaf scales about the pushed point
         width, big = 1.2, 0.9
         e = self.bake(door, **{"Larghezza": width, "Larghezza anta grande": big})
-        shift = width - DOOR_WIDTH
+        half = (width - DOOR_WIDTH) / 2
         arc = e["45"]
-        assert arc.dxf.center.round(6) == Vec3(0.45 + shift, -0.05, 0).round(6)
+        assert arc.dxf.center.round(6) == Vec3(0.45 + half, -0.05, 0).round(6)
         assert arc.dxf.radius == pytest.approx(0.6 * big / 0.6)
         # and the leaf line, turned by 270 degrees, grows upward by the change
         assert e["36"].dxf.start.y == pytest.approx(0.6 + (big - 0.6))
@@ -333,3 +336,95 @@ class TestDoorBake:
     def test_as_drawn_changes_nothing(self, door):
         e = self.bake(door)
         assert geometry(e.values()) == geometry(door.blocks["SERRINT"])
+
+
+class TestDoorChainAndFlips:
+    """The double door of the 2264 master, checked against AutoCAD: the small
+    leaf is a hidden parameter chained to the width and the big leaf, the
+    hinge side and the opening side are flip parameters. The 30 references
+    AutoCAD saved in the client's test drawing bake to the same geometry
+    (checked outside the suite, the drawing is client data)."""
+
+    def bake(self, door, linear=None, flips=None, visibility=None):
+        doc = ezdxf.new("R2010")
+        d = dynblocks.copy_dynamic_block(door, "SERRINT", doc)
+        ref = dynblocks.insert_dynamic_block(
+            d, doc.modelspace(), (0, 0),
+            Values(linear=linear or {}, flips=flips or {}, visibility=visibility),
+        )
+        return d, ref, by_index(d.block, doc.blocks[ref.dxf.name])
+
+    def test_small_leaf_is_hidden_and_chained(self, door):
+        d = dynblocks.DynamicBlockDefinition.load(door, "SERRINT")
+        small = d.linear_parameter("Anta piccola")
+        assert small.show_properties is False
+        assert small.chain_actions is True
+        rates = {p.label: round(r, 9) for p, r in d.chain_of(small)}
+        assert rates == {"Larghezza": 1.0, "Larghezza anta grande": -1.0}
+        assert all(p.chain_actions is False for p in d.linear_parameters if p is not small)
+        assert d.unsupported == []
+
+    def test_small_leaf_is_the_width_minus_the_big_leaf(self, door):
+        width, big = 1.2, 0.7
+        _, _, e = self.bake(door, linear={"Larghezza": width, "Larghezza anta grande": big},
+                            visibility="Doppia anta")
+        small = 0.3 + (width - DOOR_WIDTH) - (big - 0.6)
+        assert e["37"].dxf.radius == pytest.approx(small)  # the small leaf's swing
+        assert e["45"].dxf.radius == pytest.approx(big)  # the big leaf's swing
+        # the two leaves meet: small hinge + small leaf = big hinge - big leaf
+        assert e["37"].dxf.center.x + small == pytest.approx(e["45"].dxf.center.x - big)
+
+    def test_flip_states(self, door):
+        d = dynblocks.DynamicBlockDefinition.load(door, "SERRINT")
+        assert [(p.label, p.state_names) for p in d.flip_parameters] == [
+            ("Lato apertura", ("Non ribaltato", "Ribaltato")),
+            ("Lato cerniera", ("Non ribaltato", "Ribaltato")),
+            ("Lato testi", ("Non ribaltato", "Ribaltato")),
+        ]
+        hinge = d.flip_parameter("Lato cerniera")
+        assert hinge.state_index("Ribaltato") == 1
+        assert hinge.state_index(False) == 0
+        with pytest.raises(dynblocks.DynamicBlockError):
+            hinge.state_index("Sinistra")
+
+    def test_hinge_side_mirrors_about_the_middle_of_the_door(self, door):
+        _, _, e = self.bake(door, linear={"Larghezza": 1.2}, flips={"Lato cerniera": "Ribaltato"})
+        half = (1.2 - DOOR_WIDTH) / 2
+        arc = e["47"]  # hinged on the right jamb now
+        assert arc.dxf.center.round(6) == Vec3(0.45 + half, -0.05, 0).round(6)
+        assert arc.dxf.radius == pytest.approx(0.9 * 1.2 / DOOR_WIDTH)
+        # mirrored about a vertical line the arc still runs counter clockwise
+        assert (arc.dxf.start_angle, arc.dxf.end_angle) == (pytest.approx(90.0), pytest.approx(180.0))
+
+    def test_opening_side_mirrors_the_base_point_too(self, door):
+        # The flip line is the room face (y = -0.05) and the flip selects the
+        # base point: mirrored to (0, -0.1), it is shifted back onto the
+        # insertion point, so the geometry moves up by 0.1 — what AutoCAD
+        # does (its "Prova ribaltamenti SERRINT" references match).
+        _, _, e = self.bake(door, flips={"Lato apertura": True})
+        assert e["46"].dxf.end.y == pytest.approx(-0.05 - 0.9 + 0.1)  # the leaf points away
+        assert e["33"].dxf.start.y == pytest.approx(0.05 + 0.1)  # and so does the far face
+
+    def test_flip_and_base_point_records(self, door):
+        d, ref, _ = self.bake(door, linear={"Larghezza": 1.2}, flips={"Lato cerniera": 1})
+        data = ref.get_extension_dict()["AcDbBlockRepresentation"]["AppDataCache"]["ACAD_ENHANCEDBLOCKDATA"]
+
+        def rec(node):
+            return list(data[str(node)].tags)
+
+        hinge = d.flip_parameter("Lato cerniera")
+        opening = d.flip_parameter("Lato apertura")
+        assert [v for c, v in rec(hinge.node_id) if c == 70][-1] == 1
+        assert [v for c, v in rec(hinge.grip_node) if c == 70][-2:] == [0, 1]
+        # the opening side is carried over by the hinge flip: its grip and
+        # third point say so, its state does not change
+        assert [v for c, v in rec(opening.grip_node) if c == 70][-2:] == [1, 0]
+        assert [Vec3(v) for c, v in rec(opening.node_id) if c == 10][2] == Vec3(0, 0, 1)
+        assert [Vec3(v) for c, v in rec(d.base_point.node_id) if c == 10] == [Vec3(0, 0, 0)]
+        # the width runs the other way and is centred on the insertion point
+        width = d.linear_parameter("Larghezza")
+        a, b, normal = [Vec3(v) for c, v in rec(width.node_id) if c == 10]
+        assert (b - a).magnitude == pytest.approx(1.2)
+        assert a.x == pytest.approx(-b.x + (a.x + b.x))  # sanity
+        assert a.x > b.x
+        assert normal == Vec3(0, 0, 1)
