@@ -6,7 +6,9 @@ The result mirrors what AutoCAD writes for a dynamic block reference:
 
 - an anonymous ``*U`` block holding the evaluated geometry, whose BLOCK_RECORD
   carries the ``AcDbBlockRepBTag`` xdata pointing at the definition;
-- an INSERT of that block with an extension dictionary
+- an INSERT of that block (its geometry stretched, scaled, flipped and shifted
+  like AutoCAD does, see :func:`~ezdxf.addons.dynblocks.bake.evaluate`) with an
+  extension dictionary
   ``AcDbBlockRepresentation`` -> ``AcDbRepData`` (definition handle) and
   ``AppDataCache/ACAD_ENHANCEDBLOCKDATA`` -> one XRECORD per parameter with the
   current value;
@@ -15,6 +17,7 @@ The result mirrors what AutoCAD writes for a dynamic block reference:
 """
 from __future__ import annotations
 
+import math
 import unicodedata
 from typing import TYPE_CHECKING, Mapping, Optional, Union
 
@@ -26,11 +29,13 @@ from ezdxf.lldxf.tags import Tags
 from ezdxf.lldxf.types import DXFTag, dxftag
 from ezdxf.math import Vec3
 
-from .bake import apply_linear_values, apply_visibility, current_visibility_state
+from .bake import Evaluation, apply_visibility, current_visibility_state, evaluate
 from .copy import ensure_appids, ensure_class, register_fields
 from .model import (
     APPID_REP_BTAG,
     APPID_REP_ETAG,
+    BASE_POINT_PARAMETER,
+    FLIP_PARAMETER,
     LINEAR_PARAMETER,
     LOOKUP_PARAMETER,
     STRETCH_ACTION,
@@ -53,6 +58,9 @@ XRECORD_MAGIC: dict[str, tuple[int, int]] = {
     STRETCH_ACTION: (6895636, 9291323),
     VISIBILITY_PARAMETER: (135625452, 184556386),
     LOOKUP_PARAMETER: (18605567, 25317787),
+    FLIP_PARAMETER: (6887019, 9372877),
+    "BLOCKFLIPGRIP": (575085, 763560),
+    BASE_POINT_PARAMETER: (82437801, 112294725),
 }
 
 _COPY_NO_XDICT = CopyStrategy(CopySettings(copy_extension_dict=False, copy_xdata=True))
@@ -98,6 +106,8 @@ class DynamicBlockValues:
         visibility: name of the visibility state
         lookup: ``{lookup parameter label: value}``; when `visibility` is not
             given the state is derived from the lookup table
+        flips: ``{flip parameter label | name | node id: state}``, the state
+            being its name ("Ribaltato"), a bool or 0 / 1
     """
 
     def __init__(
@@ -105,10 +115,12 @@ class DynamicBlockValues:
         linear: Optional[Mapping[Union[str, int], float]] = None,
         visibility: Optional[str] = None,
         lookup: Optional[Mapping[str, str]] = None,
+        flips: Optional[Mapping[Union[str, int], Union[str, bool, int]]] = None,
     ) -> None:
         self.linear = dict(linear or {})
         self.visibility = visibility
         self.lookup = dict(lookup or {})
+        self.flips = dict(flips or {})
 
 
 def insert_dynamic_block(
@@ -169,7 +181,11 @@ def insert_dynamic_block(
         param = defn.linear_parameter(key)
         distances[param.node_id] = float(distance)
         by_parameter.append((param, float(distance)))
-    apply_linear_values(defn, entities, by_parameter, warnings)
+    flip_states = []
+    for key, value in values.flips.items():
+        fparam = defn.flip_parameter(key)
+        flip_states.append((fparam, fparam.state_index(value)))
+    ev = evaluate(defn, entities, by_parameter, flip_states, warnings)
 
     state: Optional[str] = values.visibility
     lookup_values: dict[int, str] = {}
@@ -213,7 +229,7 @@ def insert_dynamic_block(
             attrib.set_xdata(APPID_REP_ETAG, attdef.get_xdata(APPID_REP_ETAG))
 
     # 5. representation data
-    _add_representation_data(ref, defn, distances, state, lookup_values)
+    _add_representation_data(ref, defn, distances, state, lookup_values, ev)
     if bindings:
         for attrib in ref.attribs:
             param = bindings.get(attrib.dxf.tag)
@@ -262,6 +278,7 @@ def _add_representation_data(
     distances: Mapping[int, float],
     state: Optional[str],
     lookup_values: Mapping[int, str],
+    ev: Optional[Evaluation] = None,
 ) -> None:
     doc = ref.doc
     assert doc is not None
@@ -287,19 +304,58 @@ def _add_representation_data(
 
     records: list[tuple[int, list]] = []
 
+    ev = ev or Evaluation()
+
+    def flipped(handle: str) -> int:
+        return ev.mirrored.get(handle, 0) % 2
+
+    # The points are where the reference has them: carried by the other
+    # parameters' stretches, mirrored by the flips, shifted with the geometry;
+    # the third point turns over with each flip (AutoCAD writes -Z as drawn).
     for param in defn.linear_parameters:
         magic = XRECORD_MAGIC[LINEAR_PARAMETER]
-        end = param.end_point_for(distances.get(param.node_id, param.default_distance))
+        own = distances.get(param.node_id, param.default_distance) - param.default_distance
+        base = ev.place(defn, param.handle, param.base)
+        end = ev.place(defn, param.handle, param.end, param.direction * own)
         records.append((
             param.node_id,
             [
                 (1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104),
-                (10, param.base.xyz), (10, end.xyz), (10, (0.0, 0.0, -1.0)),
+                (10, base.xyz), (10, end.xyz), (10, (0.0, 0.0, 1.0 if flipped(param.handle) else -1.0)),
             ],
         ))
+    linear_handle = {p.node_id: p.handle for p in defn.linear_parameters}
     for action in defn.stretch_actions:
         magic = XRECORD_MAGIC[STRETCH_ACTION]
-        records.append((action.node_id, [(1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104), (40, 0.0)]))
+        angle = action.angle_offset
+        if angle and flipped(linear_handle.get(action.parameter_node, "")):
+            angle = (2 * math.pi - angle) % (2 * math.pi)
+        records.append((action.node_id, [(1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104), (40, angle)]))
+    for fparam in defn.flip_parameters:
+        magic = XRECORD_MAGIC[FLIP_PARAMETER]
+        flip_state = ev.flips.get(fparam.node_id, 0)
+        turned = flipped(fparam.handle)
+        records.append((
+            fparam.node_id,
+            [
+                (1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104),
+                (10, ev.place(defn, fparam.handle, fparam.base).xyz),
+                (10, ev.place(defn, fparam.handle, fparam.end).xyz),
+                (10, (0.0, 0.0, 1.0 if turned else -1.0)), (70, flip_state),
+            ],
+        ))
+        if fparam.grip_node:
+            magic = XRECORD_MAGIC["BLOCKFLIPGRIP"]
+            records.append((
+                fparam.grip_node,
+                [(1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104), (70, turned), (70, flip_state)],
+            ))
+    if defn.base_point is not None:
+        magic = XRECORD_MAGIC[BASE_POINT_PARAMETER]
+        records.append((
+            defn.base_point.node_id,
+            [(1071, magic[0]), (1071, magic[1]), (70, 25), (70, 104), (10, defn.base_point.point.xyz)],
+        ))
     vis = defn.visibility
     if vis is not None and state is not None:
         magic = XRECORD_MAGIC[VISIBILITY_PARAMETER]

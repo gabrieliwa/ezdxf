@@ -1,7 +1,8 @@
 #  Copyright (c) 2026, Euclide srl
 #  License: MIT License
 """AutoCAD dynamic blocks: parse a definition, copy it between documents and
-insert references with evaluated parameters (stretch and visibility states).
+insert references with evaluated parameters (stretch, scale, flip, base point
+and visibility states).
 
 Example::
 
@@ -20,8 +21,11 @@ Example::
     )
 """
 from .model import (
+    BasePointParameter,
     DynamicBlockDefinition,
     DynamicBlockError,
+    FlipAction,
+    FlipParameter,
     LinearParameter,
     LookupAction,
     LookupParameter,
@@ -40,6 +44,11 @@ from .instance import (
     insert_dynamic_block,
 )
 from .bake import (
+    Evaluation,
+    evaluate,
+    linear_deltas,
+    mirror_entity,
+    mirror_point,
     apply_linear,
     apply_linear_values,
     apply_visibility,
@@ -49,9 +58,13 @@ from .bake import (
 )
 
 __all__ = [
+    "BasePointParameter",
     "DynamicBlockDefinition",
     "DynamicBlockError",
     "DynamicBlockValues",
+    "Evaluation",
+    "FlipAction",
+    "FlipParameter",
     "LinearParameter",
     "LookupAction",
     "LookupParameter",
@@ -67,10 +80,14 @@ __all__ = [
     "dynamic_blocks",
     "ensure_appids",
     "ensure_class",
+    "evaluate",
     "field_checksum",
     "guess_field_bindings",
     "insert_dynamic_block",
     "is_dynamic_block",
+    "linear_deltas",
+    "mirror_entity",
+    "mirror_point",
     "move_vertices",
     "scale_entity",
     "register_fields",
