@@ -134,6 +134,7 @@ def insert_dynamic_block(
     field_bindings: Optional[Mapping[str, Union[str, int]]] = None,
     precision: int = 2,
     warnings: Optional[list[str]] = None,
+    representations: Optional[dict] = None,
 ) -> Insert:
     """Insert a reference of the dynamic block `defn` into `layout` with the
     parameter `values` already applied ("virtual REGEN").
@@ -151,6 +152,12 @@ def insert_dynamic_block(
         precision: decimals of the field formatted distances
         warnings: collector for non fatal problems (unsupported stretch
             targets); without it those raise :class:`DynamicBlockError`
+        representations: a dict kept by the caller for one document: references
+            with the same definition and the same parameter values share one
+            anonymous ``*U`` block, as AutoCAD does for copied references.
+            Without it every reference gets its own block. A large survey
+            (thousands of doors) otherwise copies the definition thousands of
+            times; warnings of a shared evaluation are reported once.
     """
     doc = layout.doc
     if doc is None or defn.doc is not doc:
@@ -158,23 +165,7 @@ def insert_dynamic_block(
     values = values or DynamicBlockValues()
     ensure_appids(doc)
 
-    # 1. anonymous block with the evaluated geometry
-    src_block = defn.block
-    anon = doc.blocks.new_anonymous_block("U", base_point=src_block.block.dxf.base_point)
-    anon.block.dxf.flags = src_block.block.dxf.flags | const.BLK_ANONYMOUS
-    entities: dict[str, DXFGraphic] = {}
-    handle_map = HandleMap()
-    for entity in src_block:
-        clone = entity.copy(copy_strategy=_COPY_NO_XDICT)
-        anon.add_entity(clone)
-        entities[entity.dxf.handle] = clone
-        handle_map[entity.dxf.handle] = clone.dxf.handle
-        _retag_entity(entity, clone)
-    for entity in src_block:
-        if entity.has_extension_dict:  # e.g. the FIELD of an ATTDEF
-            _clone_extension_dict(entity, entities[entity.dxf.handle], handle_map)
-
-    # 2. evaluate the parameters
+    # 1. the parameter values, resolved against the definition
     distances: dict[int, float] = {}
     by_parameter: list[tuple[LinearParameter, float]] = []
     for key, distance in values.linear.items():
@@ -185,33 +176,72 @@ def insert_dynamic_block(
     for key, value in values.flips.items():
         fparam = defn.flip_parameter(key)
         flip_states.append((fparam, fparam.state_index(value)))
-    ev = evaluate(defn, entities, by_parameter, flip_states, warnings)
-
-    state: Optional[str] = values.visibility
-    lookup_values: dict[int, str] = {}
+    given_lookup: dict[int, str] = {}
     for label, value in values.lookup.items():
-        lparam = defn.lookup_parameter(label)
-        lookup_values[lparam.node_id] = str(value)
-        if state is None:
-            action = defn.lookup_action_of(lparam)
-            if action is not None:
-                state = action.state_for_value(str(value))
-    vis = defn.visibility
-    if vis is not None:
-        if state is None:
-            state = current_visibility_state(entities, vis) or vis.state_names[0]
-        apply_visibility(entities, vis, state)
-        for lparam in defn.lookup_parameters:
-            if lparam.node_id not in lookup_values:
-                action = defn.lookup_action_of(lparam)
-                value = action.value_for_state(state) if action else None
-                if value is not None:
-                    lookup_values[lparam.node_id] = value
+        given_lookup[defn.lookup_parameter(label).node_id] = str(value)
 
-    # 3. link the anonymous block to the definition
-    anon.block_record.set_xdata(
-        APPID_REP_BTAG, [(1070, 1), (1005, defn.block_record.dxf.handle)]
-    )
+    cache_key = None
+    shared = None
+    if representations is not None:
+        cache_key = (
+            defn.block_record.dxf.handle,
+            tuple(sorted((n, round(d, 9)) for n, d in distances.items())),
+            tuple(sorted((f.node_id, i) for f, i in flip_states)),
+            values.visibility,
+            tuple(sorted(given_lookup.items())),
+        )
+        shared = representations.get(cache_key)
+
+    if shared is not None:
+        anon_name, ev, state, lookup_values = shared
+    else:
+        # 2. anonymous block with the evaluated geometry
+        src_block = defn.block
+        anon = doc.blocks.new_anonymous_block("U", base_point=src_block.block.dxf.base_point)
+        anon.block.dxf.flags = src_block.block.dxf.flags | const.BLK_ANONYMOUS
+        entities: dict[str, DXFGraphic] = {}
+        handle_map = HandleMap()
+        for entity in src_block:
+            clone = entity.copy(copy_strategy=_COPY_NO_XDICT)
+            anon.add_entity(clone)
+            entities[entity.dxf.handle] = clone
+            handle_map[entity.dxf.handle] = clone.dxf.handle
+            _retag_entity(entity, clone)
+        for entity in src_block:
+            if entity.has_extension_dict:  # e.g. the FIELD of an ATTDEF
+                _clone_extension_dict(entity, entities[entity.dxf.handle], handle_map)
+
+        ev = evaluate(defn, entities, by_parameter, flip_states, warnings)
+
+        state: Optional[str] = values.visibility
+        lookup_values: dict[int, str] = dict(given_lookup)
+        if state is None:
+            for label, value in values.lookup.items():
+                action = defn.lookup_action_of(defn.lookup_parameter(label))
+                if action is not None:
+                    state = action.state_for_value(str(value))
+                    if state is not None:
+                        break
+        vis = defn.visibility
+        if vis is not None:
+            if state is None:
+                state = current_visibility_state(entities, vis) or vis.state_names[0]
+            apply_visibility(entities, vis, state)
+            for lparam in defn.lookup_parameters:
+                if lparam.node_id not in lookup_values:
+                    action = defn.lookup_action_of(lparam)
+                    value = action.value_for_state(state) if action else None
+                    if value is not None:
+                        lookup_values[lparam.node_id] = value
+
+        # 3. link the anonymous block to the definition
+        anon.block_record.set_xdata(
+            APPID_REP_BTAG, [(1070, 1), (1005, defn.block_record.dxf.handle)]
+        )
+        anon_name = anon.name
+        if cache_key is not None:
+            representations[cache_key] = (anon_name, ev, state, lookup_values)
+    anon = doc.blocks.get(anon_name)
 
     # 4. the block reference and its attributes
     ref = layout.add_blockref(anon.name, insert, dxfattribs=dxfattribs)

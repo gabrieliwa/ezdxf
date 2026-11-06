@@ -213,6 +213,45 @@ class TestInsert:
         assert a.dxf.name != b.dxf.name
         assert dynblkhelper.get_dynamic_block_definition(a) is dynblkhelper.get_dynamic_block_definition(b)
 
+    def test_identical_references_share_one_anonymous_block(self, master):
+        doc = ezdxf.new("R2010")
+        d = dynblocks.copy_dynamic_block(master, "TAVOLO", doc)
+        reps: dict = {}
+        msp = doc.modelspace()
+        a = dynblocks.insert_dynamic_block(d, msp, (0, 0), Values(linear={"Larghezza Tavolo": 1.2}), representations=reps)
+        b = dynblocks.insert_dynamic_block(d, msp, (5, 0), Values(linear={"Larghezza Tavolo": 1.2}), representations=reps)
+        c = dynblocks.insert_dynamic_block(d, msp, (9, 0), Values(linear={"Larghezza Tavolo": 1.8}), representations=reps)
+        assert a.dxf.name == b.dxf.name != c.dxf.name
+        assert len([blk for blk in doc.blocks if blk.name.startswith("*U")]) == 2
+        # each reference still carries its own representation data
+        assert a.get_extension_dict().dictionary is not b.get_extension_dict().dictionary
+        assert dynblkhelper.get_dynamic_block_definition(b) is dynblkhelper.get_dynamic_block_definition(c)
+
+    def test_shared_block_has_the_same_geometry(self, master):
+        doc = ezdxf.new("R2010")
+        d = dynblocks.copy_dynamic_block(master, "LETTO", doc)
+        reps: dict = {}
+        msp = doc.modelspace()
+        first = dynblocks.insert_dynamic_block(d, msp, (0, 0), Values(lookup={"Controllo dinamico1": "DOPPIO"}), representations=reps)
+        alone = dynblocks.insert_dynamic_block(d, msp, (0, 0), Values(lookup={"Controllo dinamico1": "DOPPIO"}))
+        again = dynblocks.insert_dynamic_block(d, msp, (3, 0), Values(lookup={"Controllo dinamico1": "DOPPIO"}), representations=reps)
+        assert again.dxf.name == first.dxf.name != alone.dxf.name
+        assert geometry(doc.blocks.get(again.dxf.name)) == geometry(doc.blocks.get(alone.dxf.name))
+
+    def test_saved_document_with_shared_blocks_audits_clean(self, master, tmp_path):
+        doc = ezdxf.new("R2010")
+        d = dynblocks.copy_dynamic_block(master, "TAVOLO", doc)
+        reps: dict = {}
+        for i in range(3):
+            dynblocks.insert_dynamic_block(d, doc.modelspace(), (i * 3, 0), Values(linear={"Larghezza Tavolo": 1.2}), representations=reps)
+        path = tmp_path / "shared.dxf"
+        doc.saveas(path)
+        again = ezdxf.readfile(path)
+        auditor = again.audit()
+        assert not auditor.has_errors
+        names = {e.dxf.name for e in again.modelspace().query("INSERT")}
+        assert len(names) == 1
+
 
 def test_static_block_with_guid_xdata_is_not_dynamic():
     # AutoCAD tags static blocks edited in the block editor with the GUID
